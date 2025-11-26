@@ -1,0 +1,52 @@
+=== handle_chat_kd started ===
+=== handle_chat_kd started ===
+[RECV] Thread started
+[SEND] Thread started
+[SEND] Thread started
+[RECV] Thread started
+[SEND] Got text: 'hi'
+[SEND] Encrypted to 30 bytes
+[SEND] Sent successfully
+[RECV] Got 30 bytes
+[RECV] Decrypted 2 bytes
+[RECV] Message: 'hi'
+=== handle_chat_kd started ===
+[SEND] [RECV] Thread startedThread started
+
+=== handle_chat_kd started ===
+[RECV] Thread started
+[SEND] Thread started
+[SEND] Got text: 'hi'
+[SEND] Encrypted to 30 bytes
+[SEND] Sent successfully
+[RECV] Got 30 bytes
+[RECV] Decrypted 2 bytes
+[RECV] Message: 'hi'
+[SEND] Got text: 'jhyudfg '
+[SEND] Encrypted to 36 bytes
+[SEND] Sent successfully
+[RECV] Got 36 bytes
+[RECV] Decrypted 8 bytes
+[RECV] Message: 'jhyudfg '
+=== handle_chat_kd started ===
+[RECV] Thread started
+[SEND] Thread started
+=== handle_chat_kd started ===
+[RECV] Thread started
+[SEND] Thread started
+[RECV] Error: An existing connection was forcibly closed by the remote host. (os error 10054)
+[RECV] Error: An existing connection was forcibly closed by the remote host. (os error 10054)
+[RECV] Error: An existing connection was forcibly closed by the remote host. (os error 10054)
+=== handle_chat_kd started ===
+=== handle_chat_kd started ===
+[RECV] Thread started
+[SEND] Thread started
+[RECV] Thread started
+[SEND] Thread started
+[SEND] Got text: 'hi'
+[SEND] Encrypted to 30 bytes
+[SEND] Sent successfully
+[RECV] Got 30 bytes
+[RECV] Decrypted 2 bytes
+[RECV] Message: 'hi'
+[RECV] Error: An existing connection was forcibly closed by the remote host. (os error 10054)

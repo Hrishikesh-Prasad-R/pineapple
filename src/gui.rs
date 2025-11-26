@@ -4,7 +4,7 @@
 // egui = "0.29"
 // tokio = { version = "1", features = ["full"] }
 // (keep all your existing dependencies)
-
+use pyo3::Python;
 use eframe::egui;
 use pineapple::{messages, network, pqxdh, Session};
 use std::{
@@ -18,7 +18,20 @@ use std::{
     time::SystemTime,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CryptoMode {
+    PQXDH,
+    KyberDilithiumAES,
+}
+
 fn main() -> Result<(), eframe::Error> {
+     unsafe{std::env::set_var("PYTHONPATH", 
+        std::env::current_dir()
+            .unwrap()
+            .join("libs")
+            .to_str()
+            .unwrap()
+    );}
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 700.0])
@@ -30,7 +43,6 @@ fn main() -> Result<(), eframe::Error> {
         "Pineapple",
         options,
         Box::new(|cc| {
-            // Set WhatsApp-like dark theme
             cc.egui_ctx.set_visuals(create_whatsapp_theme());
             Ok(Box::new(PineappleApp::default()))
         }),
@@ -40,16 +52,15 @@ fn main() -> Result<(), eframe::Error> {
 fn create_whatsapp_theme() -> egui::Visuals {
     let mut visuals = egui::Visuals::dark();
     
-    // WhatsApp dark theme colors
     visuals.override_text_color = Some(egui::Color32::from_rgb(230, 230, 230));
-    visuals.panel_fill = egui::Color32::from_rgb(17, 27, 33); // Dark background
+    visuals.panel_fill = egui::Color32::from_rgb(17, 27, 33);
     visuals.window_fill = egui::Color32::from_rgb(17, 27, 33);
-    visuals.extreme_bg_color = egui::Color32::from_rgb(32, 44, 51); // Chat area
+    visuals.extreme_bg_color = egui::Color32::from_rgb(32, 44, 51);
     
     visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(32, 44, 51);
     visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(32, 44, 51);
     visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(42, 57, 66);
-    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0, 95, 78); // WhatsApp green
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0, 95, 78);
     
     visuals
 }
@@ -69,6 +80,7 @@ enum ConnectionState {
 
 struct PineappleApp {
     state: ConnectionState,
+    crypto_mode: CryptoMode,
     messages: Vec<Message>,
     input_text: String,
     connect_address: String,
@@ -86,6 +98,7 @@ impl Default for PineappleApp {
         Self {
             state: ConnectionState::Disconnected,
             messages: Vec::new(),
+            crypto_mode: CryptoMode::PQXDH,
             input_text: String::new(),
             connect_address: String::new(),
             message_sender: None,
@@ -96,7 +109,6 @@ impl Default for PineappleApp {
         }
     }
 }
-
 impl PineappleApp {
     fn start_listener(&mut self) {
         let listener = TcpListener::bind("0.0.0.0:0").unwrap();
@@ -104,10 +116,8 @@ impl PineappleApp {
         let connection_string = format!("127.0.0.1:{}", port);
         
         self.state = ConnectionState::Listening(connection_string.clone());
-        self.messages.push(Message::System(format!(
-            "Waiting for connection on port {}",
-            port
-        )));
+        self.messages
+            .push(Message::System(format!("Waiting for connection on port {}", port)));
 
         let (tx, rx) = mpsc::channel();
         let (msg_tx, msg_rx) = mpsc::channel();
@@ -115,12 +125,58 @@ impl PineappleApp {
         *self.message_receiver.lock().unwrap() = Some(msg_rx);
 
         let running = Arc::clone(&self.running);
+        let crypto_mode = self.crypto_mode;
 
         thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
                 msg_tx.send(Message::System("Peer connected! Establishing secure session...".into())).ok();
+
+                if crypto_mode == CryptoMode::KyberDilithiumAES {
+                    msg_tx.send(Message::System("🔐 Using Kyber768 + Dilithium3 + AES-GCM".into())).ok();
+
+                     let my_data = Python::with_gil(|py| {
+                        pineapple::kyber_dilithium::kd_init_handshake(py).expect("KD init")
+                    });
+
+                    // Network I/O WITHOUT GIL
+                    // CORRECT ORDER (listener sends first, connector receives first):
+                    pineapple::network_kd::send_json(&mut stream, &my_data).expect("send KD self");
+
+                    let theirs: pineapple::kyber_dilithium::KDHandshakeData =
+                        pineapple::network_kd::recv_json(&mut stream).expect("recv KD peer");
+
+                    // Process handshake with Python
+                    // Process handshake with Python
                 
+                let (kd_session, ciphertext) = Python::with_gil(|py| {
+                    let (ciphertext, shared) =
+                        pineapple::kyber_dilithium::kd_process_handshake(py, &theirs)
+                            .expect("KD process");
+                    
+                    let session = pineapple::kyber_dilithium::KDSession::new(&shared);
+                    (session, ciphertext)  // Return BOTH
+                });
+
+                            // Send ciphertext OUTSIDE Python block
+            
+            match pineapple::network_kd::send_json(&mut stream, &ciphertext) {
+                Ok(_) => msg_tx.send(Message::System("DEBUG: Ciphertext sent successfully".into())).ok(),
+                Err(e) => {
+                    msg_tx.send(Message::System(format!("ERROR sending ciphertext: {}", e))).ok();
+                    return;
+                }
+            };
+
+                msg_tx.send(Message::System("🔒 Encrypted using AES-GCM".into())).ok();
+                
+                handle_chat_kd(kd_session, stream, rx, msg_tx, running);
+                    
+                    return;
+                }
+
+                // PQXDH path
                 let alice = pqxdh::User::new();
+
                 if let Err(_) = send_public_keys(&mut stream, &alice) {
                     msg_tx.send(Message::System("Handshake failed".into())).ok();
                     return;
@@ -145,7 +201,9 @@ impl PineappleApp {
                 if network::send_message(
                     &mut stream,
                     &network::serialize_pqxdh_init_message(&init_message),
-                ).is_err() {
+                )
+                .is_err()
+                {
                     return;
                 }
 
@@ -159,7 +217,8 @@ impl PineappleApp {
     fn start_connect(&mut self) {
         let address = self.connect_address.clone();
         self.state = ConnectionState::Connecting;
-        self.messages.push(Message::System(format!("Connecting to {}", address)));
+        self.messages
+            .push(Message::System(format!("Connecting to {}", address)));
 
         let (tx, rx) = mpsc::channel();
         let (msg_tx, msg_rx) = mpsc::channel();
@@ -167,6 +226,7 @@ impl PineappleApp {
         *self.message_receiver.lock().unwrap() = Some(msg_rx);
 
         let running = Arc::clone(&self.running);
+        let crypto_mode = self.crypto_mode;
 
         thread::spawn(move || {
             let mut stream = match TcpStream::connect(&address) {
@@ -180,6 +240,41 @@ impl PineappleApp {
                 }
             };
 
+            if crypto_mode == CryptoMode::KyberDilithiumAES {
+                msg_tx.send(Message::System("🔐 Using Kyber768 + Dilithium3 + AES-GCM".into())).ok();
+
+                // Generate keys FIRST
+                let my_data = Python::with_gil(|py| {
+                    pineapple::kyber_dilithium::kd_init_handshake(py).expect("KD init")
+                });
+
+                // Network I/O WITHOUT GIL
+                let theirs: pineapple::kyber_dilithium::KDHandshakeData =
+                    pineapple::network_kd::recv_json(&mut stream).expect("KD recv peer");
+
+                pineapple::network_kd::send_json(&mut stream, &my_data).expect("KD send");
+
+                let ciphertext: Vec<u8> =
+                    pineapple::network_kd::recv_json(&mut stream).expect("KD recv ciphertext");
+
+                // Finish handshake with Python
+                let kd_session = Python::with_gil(|py| {
+                    let shared = pineapple::kyber_dilithium::kd_finish_handshake(
+                        py,
+                        ciphertext,
+                        my_data.kyber_sk.clone(),  // ✅ FIXED!
+                    )
+                    .expect("KD finish");
+
+                    pineapple::kyber_dilithium::KDSession::new(&shared)
+                });
+
+                msg_tx.send(Message::System("🔒 Encrypted using AES-GCM".into())).ok();
+                handle_chat_kd(kd_session, stream, rx, msg_tx, running);
+                return;
+            }
+
+            // PQXDH path
             let mut bob = pqxdh::User::new();
 
             let _alice = match receive_public_keys(&mut stream) {
@@ -215,6 +310,7 @@ impl PineappleApp {
         });
     }
 
+
     fn send_message(&mut self) {
         if let Some(sender) = &self.message_sender {
             if !self.input_text.trim().is_empty() {
@@ -236,7 +332,9 @@ impl PineappleApp {
         self.messages.clear();
         self.message_sender = None;
         *self.message_receiver.lock().unwrap() = None;
+        self.running = Arc::new(AtomicBool::new(true));
     }
+    
 
     fn format_time(time: SystemTime) -> String {
         match time.duration_since(SystemTime::UNIX_EPOCH) {
@@ -250,14 +348,13 @@ impl PineappleApp {
         }
     }
 }
-
 impl eframe::App for PineappleApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Poll for incoming messages
         if let Some(receiver) = self.message_receiver.lock().unwrap().as_ref() {
             while let Ok(msg) = receiver.try_recv() {
                 match msg {
-                    Message::Text { content, is_sent, timestamp } => {
+                    Message::Text { content, is_sent: _, timestamp } => {
                         self.messages.push(Message::Text { 
                             content, 
                             is_sent: false,
@@ -265,7 +362,7 @@ impl eframe::App for PineappleApp {
                         });
                     }
                     Message::System(text) => {
-                        if text.contains("End-to-end encrypted") {
+                        if text.contains("End-to-end encrypted") || text.contains("Encrypted using AES-GCM") {
                             self.state = ConnectionState::Connected;
                         }
                         self.messages.push(Message::System(text));
@@ -288,7 +385,6 @@ impl eframe::App for PineappleApp {
         match &self.state {
             ConnectionState::Disconnected => {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    // WhatsApp green gradient background
                     let painter = ui.painter();
                     let rect = ui.available_rect_before_wrap();
                     painter.rect_filled(
@@ -300,7 +396,6 @@ impl eframe::App for PineappleApp {
                     ui.vertical_centered(|ui| {
                         ui.add_space(80.0);
                         
-                        // Logo and title
                         ui.horizontal(|ui| {
                             ui.add_space(ui.available_width() / 2.0 - 180.0);
                             ui.label(egui::RichText::new("🍍").size(60.0));
@@ -317,15 +412,20 @@ impl eframe::App for PineappleApp {
                         
                         ui.add_space(50.0);
                         
-                        // Connection options
                         egui::Frame::none()
                             .fill(egui::Color32::from_rgb(32, 44, 51))
                             .rounding(10.0)
                             .inner_margin(30.0)
                             .show(ui, |ui| {
                                 ui.set_max_width(500.0);
-                                
-                                // Start Listening button
+                                ui.label(egui::RichText::new("Cryptography Mode").size(16.0));
+
+                                ui.horizontal(|ui| {
+                                    ui.selectable_value(&mut self.crypto_mode, CryptoMode::PQXDH, "PQXDH (default)");
+                                    ui.selectable_value(&mut self.crypto_mode, CryptoMode::KyberDilithiumAES, "Kyber + Dilithium + AES");
+                                });
+                                ui.add_space(20.0);
+
                                 let listen_btn = egui::Button::new(
                                     egui::RichText::new("📱  Start Listening")
                                         .size(18.0)
@@ -347,7 +447,6 @@ impl eframe::App for PineappleApp {
                                 
                                 ui.add_space(20.0);
                                 
-                                // Connect section
                                 ui.label(egui::RichText::new("Connect to peer")
                                     .size(16.0)
                                     .color(egui::Color32::from_rgb(200, 200, 200)));
@@ -390,16 +489,13 @@ impl eframe::App for PineappleApp {
                     });
                 });
             }
-            
             _ => {
-                // WhatsApp-style header
                 egui::TopBottomPanel::top("header")
                     .exact_height(60.0)
                     .show(ctx, |ui| {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.add_space(10.0);
                             
-                            // Avatar circle
                             let (rect, _) = ui.allocate_exact_size(
                                 egui::vec2(40.0, 40.0),
                                 egui::Sense::hover()
@@ -456,7 +552,6 @@ impl eframe::App for PineappleApp {
                         });
                     });
 
-                // Connection info banner (if listening)
                 if let ConnectionState::Listening(conn_str) = &self.state {
                     egui::TopBottomPanel::top("connection_banner")
                         .exact_height(50.0)
@@ -498,7 +593,6 @@ impl eframe::App for PineappleApp {
                         });
                 }
 
-                // Input area at bottom (WhatsApp style)
                 egui::TopBottomPanel::bottom("input")
                     .exact_height(60.0)
                     .show(ctx, |ui| {
@@ -520,7 +614,6 @@ impl eframe::App for PineappleApp {
                             
                             ui.add_space(5.0);
                             
-                            // Send button (circular like WhatsApp)
                             let send_btn = egui::Button::new(
                                 egui::RichText::new("➤")
                                     .size(18.0)
@@ -538,7 +631,6 @@ impl eframe::App for PineappleApp {
                         });
                     });
 
-                // Chat messages area
                 egui::CentralPanel::default().show(ctx, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false; 2])
@@ -550,7 +642,6 @@ impl eframe::App for PineappleApp {
                                 match msg {
                                     Message::Text { content, is_sent, timestamp } => {
                                         if *is_sent {
-                                            // Sent message (right aligned, green bubble)
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                                 ui.add_space(10.0);
                                                 
@@ -574,7 +665,6 @@ impl eframe::App for PineappleApp {
                                                     });
                                             });
                                         } else {
-                                            // Received message (left aligned, dark bubble)
                                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                                                 ui.add_space(10.0);
                                                 
@@ -625,6 +715,101 @@ impl eframe::App for PineappleApp {
         }
     }
 }
+fn handle_chat_kd(
+    session: pineapple::kyber_dilithium::KDSession,
+    mut stream: TcpStream,
+    outgoing_rx: Receiver<String>,
+    incoming_tx: Sender<Message>,
+    running: Arc<AtomicBool>,
+) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    
+    let log = |msg: String| {
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("kd_debug.log")
+        {
+            writeln!(file, "{}", msg).ok();
+        }
+    };
+    
+    log(format!("=== handle_chat_kd started ==="));
+    
+    let stream_clone = stream.try_clone().unwrap();
+    let session = Arc::new(session);
+    let session_clone = Arc::clone(&session);
+    let running_clone = Arc::clone(&running);
+
+    // Receiving thread
+    thread::spawn(move || {
+        let log = |msg: String| {
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("kd_debug.log") {
+                writeln!(file, "[RECV] {}", msg).ok();
+            }
+        };
+        
+        let mut stream = stream_clone;
+        log("Thread started".into());
+        
+        loop {
+            if !running_clone.load(Ordering::SeqCst) {
+                log("Stopping".into());
+                break;
+            }
+            match pineapple::network_kd::recv_json::<Vec<u8>>(&mut stream) {
+                Ok(raw) if !raw.is_empty() => {
+                    log(format!("Got {} bytes", raw.len()));
+                    if let Ok(pt) = session_clone.decrypt(&raw) {
+                        log(format!("Decrypted {} bytes", pt.len()));
+                        if let Ok(msg) = String::from_utf8(pt) {
+                            log(format!("Message: '{}'", msg));
+                            incoming_tx.send(Message::Text {
+                                content: msg,
+                                is_sent: false,
+                                timestamp: SystemTime::now()
+                            }).ok();
+                        }
+                    } else {
+                        log("Decrypt FAILED".into());
+                    }
+                }
+                Ok(_) => log("Empty".into()),
+                Err(e) => {
+                    log(format!("Error: {}", e));
+                    break;
+                }
+            }
+        }
+    });
+
+    // Sending thread
+    thread::spawn(move || {
+        let log = |msg: String| {
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("kd_debug.log") {
+                writeln!(file, "[SEND] {}", msg).ok();
+            }
+        };
+        
+        log("Thread started".into());
+        
+        while running.load(Ordering::SeqCst) {
+            if let Ok(text) = outgoing_rx.recv() {
+                log(format!("Got text: '{}'", text));
+                if !text.is_empty() {
+                    if let Ok(ct) = session.encrypt(text.as_bytes()) {
+                        log(format!("Encrypted to {} bytes", ct.len()));
+                        match pineapple::network_kd::send_json(&mut stream, &ct) {
+                            Ok(_) => log("Sent successfully".into()),
+                            Err(e) => log(format!("Send FAILED: {}", e)),
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
 
 fn send_public_keys(stream: &mut TcpStream, user: &pqxdh::User) -> anyhow::Result<()> {
     let bundle = network::serialize_prekey_bundle(user);
@@ -645,8 +830,8 @@ fn handle_chat(
     incoming_tx: Sender<Message>,
     running: Arc<AtomicBool>,
 ) {
-    let session = Arc::new(Mutex::new(session));
     let stream_clone = stream.try_clone().unwrap();
+    let session = Arc::new(Mutex::new(session));
     let session_clone = Arc::clone(&session);
     let running_clone = Arc::clone(&running);
 

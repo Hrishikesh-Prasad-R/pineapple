@@ -110,7 +110,7 @@ fn run_bob(address: &str) -> Result<()> {
 
     let mut bob = pqxdh::User::new();
 
-    let alice = receive_public_keys(&mut stream)?;
+    let _alice = receive_public_keys(&mut stream)?;
     send_public_keys(&mut stream, &bob)?;
 
     let init_message_data = network::receive_message(&mut stream)?;
@@ -151,7 +151,7 @@ fn chat_loop(session: Session, mut stream: TcpStream) -> Result<()> {
 
     terminal::enable_raw_mode()?;
 
-    let receive_handle = thread::spawn(move || {
+    let _receive_handle = thread::spawn(move || {
         let mut stream = stream_clone;
 
         loop {
