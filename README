@@ -1,4 +1,4 @@
 pineapple
 =========
 
-A simple serverless variant of the PQXDH protocol implemented in Rust.
+A simple serverless variant of the PQXDH and PQC(Kyber + dilithium) protocol implemented in Rust.
